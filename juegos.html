@@ -1,0 +1,757 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Mini Arcade Realista v2</title>
+<style>
+  :root{
+    --bg1:#071022; --panel:#0f1724; --accent:#06b6d4; --muted:#93a6b8;
+  }
+  html,body{height:100%; margin:0; font-family:Inter,Arial,Helvetica,sans-serif; background:linear-gradient(180deg,#061126 0%, #09203a 100%); color:#eaf6ff}
+  header{padding:18px; text-align:center}
+  h1{margin:6px 0; font-size:24px}
+  .menu{display:flex; gap:8px; justify-content:center; flex-wrap:wrap; margin-bottom:12px}
+  .menu button{background:linear-gradient(180deg,#08a0c8,#078aa8); color:#022; border:none; padding:10px 14px; border-radius:10px; font-weight:700; cursor:pointer; box-shadow:0 8px 20px rgba(3,10,20,.45)}
+  .menu button.secondary{background:#1f2937; color:#e6f0ff}
+  .wrap{display:flex; justify-content:center; align-items:flex-start; gap:18px; padding:12px;}
+  #canvasWrap{background:rgba(255,255,255,0.02); border-radius:12px; padding:12px; box-shadow:0 20px 50px rgba(2,6,23,.6)}
+  canvas{display:block; border-radius:8px; background:#04233d}
+  .info{max-width:900px; margin:12px auto; color:var(--muted); font-size:14px; text-align:center}
+  footer{padding:12px; text-align:center; color:var(--muted); font-size:13px}
+  @media(max-width:900px){ canvas{width:100% !important; height:auto !important;} .wrap{padding:6px} }
+</style>
+</head>
+<body>
+<header>
+  <h1>🎮 Mini Arcade Realista — v2</h1>
+  <div class="menu">
+    <button onclick="select('pong')">🏓 Pong Realista</button>
+    <button onclick="select('catch')">⚽ Atrapa la Pelota</button>
+    <button onclick="select('futbol')">⚽ Fútbol 2-Jugadores</button>
+    <button onclick="select('tetris')">🟦 Tetris Mejorado</button>
+    <button class="secondary" onclick="resetAll()">Reiniciar Todo</button>
+   
+</header>
+
+<div class="wrap">
+  <div id="canvasWrap">
+    <canvas id="game" width="900" height="520"></canvas>
+  </div>
+</div>
+
+<footer>Copiar/pegar localmente funciona en Chrome/Edge/Firefox. Si el audio no suena, haz clic en la ventana para permitir WebAudio.</footer>
+
+<script>
+/* ---------- Setup general ---------- */
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d', { alpha: false });
+let active = null;
+let raf = null;
+let keys = {};
+let pointer = {x:null,y:null};
+let audioEnabled = false;
+
+/* WebAudio small helper for effects */
+let audioCtx = null;
+function ensureAudio(){
+  if(audioCtx) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+}
+function beep(freq=440, type='sine', time=0.06, gain=0.06){
+  try{
+    ensureAudio(); audioEnabled = true;
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.type = type; o.frequency.value = freq;
+    g.gain.value = gain;
+    o.connect(g); g.connect(audioCtx.destination);
+    o.start(); g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + time);
+    setTimeout(()=>o.stop(), time*1000 + 20);
+  }catch(e){ audioEnabled=false; }
+}
+function kickSound(){
+  // low thump
+  try{
+    ensureAudio();
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.type='sine'; o.frequency.value=150;
+    g.gain.value=0.12;
+    o.connect(g); g.connect(audioCtx.destination);
+    o.start();
+    o.frequency.exponentialRampToValueAtTime(60, audioCtx.currentTime + 0.12);
+    g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.25);
+    setTimeout(()=>o.stop(), 300);
+  }catch(e){}
+}
+
+/* Inputs */
+window.addEventListener('keydown', e => { keys[e.key] = true; if(!audioEnabled) { try{ ensureAudio(); audioEnabled=true }catch{} } });
+window.addEventListener('keyup', e => { keys[e.key] = false; });
+canvas.addEventListener('pointermove', e => {
+  const r = canvas.getBoundingClientRect();
+  pointer.x = (e.clientX - r.left) * (canvas.width / r.width);
+  pointer.y = (e.clientY - r.top) * (canvas.height / r.height);
+});
+canvas.addEventListener('pointerdown', e => {
+  // resume audio context on first interaction
+  if(audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+});
+
+/* Clear loop */
+function stopLoop(){ if(raf) cancelAnimationFrame(raf); raf = null; }
+
+/* Reset everything */
+function resetAll(){
+  stopLoop();
+  keys = {};
+  pointer = {x:null,y:null};
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  active = null;
+  // reset canvas default size
+  canvas.width = 900; canvas.height = 520;
+  select('pong');
+}
+
+/* Game selector */
+function select(name){
+  stopLoop();
+  active = name;
+  // set resolution per game
+  if(name === 'tetris'){ canvas.width = 360; canvas.height = 720; }
+  else { canvas.width = 900; canvas.height = 520; }
+  // start
+  if(name === 'pong') startPong();
+  if(name === 'catch') startCatch();
+  if(name === 'futbol') startFutbol2P();
+  if(name === 'tetris') startTetris();
+}
+
+/* ---------- PONG REALISTA ---------- */
+function startPong(){
+  // parameters
+  const paddleW = 16, paddleH = 140;
+  let leftY = (canvas.height - paddleH)/2, rightY = leftY;
+  let ball = {x: canvas.width/2, y: canvas.height/2, r:10, vx: 7*(Math.random()<0.5?1:-1), vy: 3*(Math.random()<0.5?1:-1), trail: []};
+  let scoreL = 0, scoreR = 0;
+  let lastHit = null;
+
+  function updatePong(){
+    // player controls
+    if(keys['w'] || keys['W']) leftY -= 7;
+    if(keys['s'] || keys['S']) leftY += 7;
+    if(keys['ArrowUp']) rightY -= 7;
+    if(keys['ArrowDown']) rightY += 7;
+    // pointer - move right paddle on touch
+    if(pointer.y !== null) rightY = pointer.y - paddleH/2;
+
+    leftY = Math.max(8, Math.min(canvas.height - paddleH - 8, leftY));
+    rightY = Math.max(8, Math.min(canvas.height - paddleH - 8, rightY));
+
+    // move ball
+    ball.x += ball.vx; ball.y += ball.vy;
+    // create trail
+    ball.trail.unshift({x: ball.x, y: ball.y, a:0.8});
+    if(ball.trail.length>16) ball.trail.pop();
+
+    // wall bounce
+    if(ball.y - ball.r <= 8 || ball.y + ball.r >= canvas.height - 8){
+      ball.vy *= -1; beep(900,'sine',0.04,0.03);
+    }
+
+    // left paddle collision
+    if(ball.x - ball.r <= 10 + paddleW && ball.y > leftY && ball.y < leftY + paddleH){
+      // angle change based on hit position
+      const rel = (ball.y - (leftY + paddleH/2)) / (paddleH/2); // -1..1
+      ball.vx = Math.abs(ball.vx) + 0.6;
+      ball.vy = rel * 7;
+      lastHit = 'L';
+      createParticles(ball.x - ball.r, ball.y, '#38bdf8');
+      beep(1200,'square',0.03,0.04);
+    }
+    // right paddle collision
+    if(ball.x + ball.r >= canvas.width - (10 + paddleW) && ball.y > rightY && ball.y < rightY + paddleH){
+      const rel = (ball.y - (rightY + paddleH/2)) / (paddleH/2);
+      ball.vx = -Math.abs(ball.vx) - 0.6;
+      ball.vy = rel * 7;
+      lastHit = 'R';
+      createParticles(ball.x + ball.r, ball.y, '#fb7185');
+      beep(1200,'square',0.03,0.04);
+    }
+
+    // score
+    if(ball.x < 0){
+      scoreR++; resetBall('R'); kickSound();
+    } else if(ball.x > canvas.width){
+      scoreL++; resetBall('L'); kickSound();
+    }
+  }
+
+  function resetBall(side){
+    ball.x = canvas.width/2; ball.y = canvas.height/2;
+    ball.vx = 6*(side==='L'?-1:1); ball.vy = (Math.random()-0.5)*4;
+    ball.trail = [];
+  }
+
+  // particles system small
+  let particles = [];
+  function createParticles(x,y,color){
+    for(let i=0;i<16;i++){
+      particles.push({
+        x, y,
+        vx: (Math.random()-0.5)*6,
+        vy: (Math.random()-0.5)*6,
+        life: 30 + Math.random()*20,
+        c: color
+      });
+    }
+  }
+  function updateParticles(){
+    for(let i = particles.length-1; i>=0; i--){
+      let p = particles[i];
+      p.x += p.vx; p.y += p.vy;
+      p.vy += 0.12;
+      p.life--;
+      if(p.life <= 0) particles.splice(i,1);
+    }
+  }
+
+  function drawPong(){
+    // background court
+    const g = ctx.createLinearGradient(0,0,0,canvas.height);
+    g.addColorStop(0, '#0a1d2a'); g.addColorStop(1,'#03202b'); ctx.fillStyle = g;
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+
+    // center net line
+    ctx.strokeStyle = 'rgba(255,255,255,0.06)'; ctx.setLineDash([10,14]); ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(canvas.width/2,20); ctx.lineTo(canvas.width/2,canvas.height-20); ctx.stroke(); ctx.setLineDash([]);
+
+    // paddles with gradient + shadow
+    ctx.save(); ctx.shadowColor = 'rgba(0,0,0,0.6)'; ctx.shadowBlur = 14;
+    // left
+    let lg = ctx.createLinearGradient(10, leftY, 10 + paddleW, leftY + paddleH);
+    lg.addColorStop(0,'#3dd0ff'); lg.addColorStop(1,'#0e9bd1');
+    ctx.fillStyle = lg; roundRect(ctx, 10, leftY, paddleW, paddleH, 6, true, false);
+    // right
+    let rg = ctx.createLinearGradient(canvas.width - (10+paddleW), rightY, canvas.width-10, rightY + paddleH);
+    rg.addColorStop(0,'#ff93a5'); rg.addColorStop(1,'#fb6e83');
+    ctx.fillStyle = rg; roundRect(ctx, canvas.width - (10+paddleW), rightY, paddleW, paddleH, 6, true, false);
+    ctx.restore();
+
+    // ball trail
+    for(let i=0;i<ball.trail.length;i++){
+      let t = ball.trail[i];
+      ctx.beginPath();
+      ctx.fillStyle = `rgba(255,221,102,${0.08 + (i/ball.trail.length)*0.28})`;
+      ctx.arc(t.x - (i*ball.vx*0.02), t.y - (i*ball.vy*0.02), ball.r*(1 - i/ball.trail.length), 0, Math.PI*2);
+      ctx.fill();
+    }
+    // ball with high highlight
+    ctx.beginPath(); ctx.fillStyle = '#ffd166'; ctx.shadowBlur=18; ctx.shadowColor='rgba(0,0,0,0.6)'; ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI*2); ctx.fill(); ctx.shadowBlur=0;
+    // small specular highlight
+    ctx.beginPath(); ctx.fillStyle='rgba(255,255,255,0.6)'; ctx.arc(ball.x - ball.r*0.35, ball.y - ball.r*0.55, ball.r*0.35, 0, Math.PI*2); ctx.fill();
+
+    // particles
+    for(let p of particles){
+      ctx.beginPath(); ctx.fillStyle = p.c; ctx.globalAlpha = Math.max(0, p.life/60); ctx.arc(p.x,p.y,3,0,Math.PI*2); ctx.fill(); ctx.globalAlpha=1;
+    }
+
+    // scoreboard
+    ctx.fillStyle='#dff6ff'; ctx.font='36px Arial'; ctx.textAlign='center';
+    ctx.fillText(scoreL, canvas.width*0.25, 54); ctx.fillText(scoreR, canvas.width*0.75, 54);
+
+    // footer control hints
+    ctx.font='14px Arial'; ctx.fillStyle='rgba(255,255,255,0.6)'; ctx.textAlign='left';
+    ctx.fillText('W/S', 20, canvas.height - 20); ctx.textAlign='right'; ctx.fillText('↑/↓ (o tocar)', canvas.width - 20, canvas.height - 20);
+  }
+
+  function loop(){
+    updatePong(); updateParticles(); drawPong();
+    raf = requestAnimationFrame(loop);
+  }
+  loop();
+}
+
+/* ---------- ATRAPA LA PELOTA (mejorado) ---------- */
+function startCatch(){
+  const paddleW = 180, paddleH = 20;
+  let paddleX = (canvas.width - paddleW)/2;
+  let ball = {x: canvas.width/2, y: 120, r:14, vx: 3*(Math.random()<0.5?1:-1), vy: 4, spin:0};
+  let score = 0;
+  let particles = [];
+
+  // touch control
+  canvas.onpointermove = e => {
+    const rect = canvas.getBoundingClientRect();
+    const px = (e.clientX - rect.left) * (canvas.width / rect.width);
+    paddleX = px - paddleW/2;
+  };
+
+  function update(){
+    // keyboard left/right
+    if(keys['ArrowLeft']) paddleX -= 10;
+    if(keys['ArrowRight']) paddleX += 10;
+    paddleX = Math.max(10, Math.min(canvas.width - paddleW - 10, paddleX));
+
+    ball.x += ball.vx; ball.y += ball.vy;
+    ball.vx *= 0.999; ball.vy *= 0.999;
+
+    // wall bounce
+    if(ball.x - ball.r < 10){ ball.x = 10 + ball.r; ball.vx *= -1; beep(700,'sine',0.03,0.02); }
+    if(ball.x + ball.r > canvas.width - 10){ ball.x = canvas.width - 10 - ball.r; ball.vx *= -1; beep(700,'sine',0.03,0.02); }
+    if(ball.y - ball.r < 10){ ball.y = 10 + ball.r; ball.vy *= -1; }
+
+    // collision with paddle
+    if(ball.y + ball.r >= canvas.height - 70 && ball.x > paddleX && ball.x < paddleX + paddleW){
+      // reflect and impart horizontal speed based on where it hits
+      let rel = (ball.x - (paddleX + paddleW/2)) / (paddleW/2); // -1..1
+      ball.vy = -Math.abs(ball.vy) * 0.92 - 2.2;
+      ball.vx += rel * 3;
+      // spin effect
+      ball.spin = rel * 0.2;
+      // particles
+      for(let i=0;i<12;i++) particles.push({x: ball.x, y: canvas.height - 70, vx: (Math.random()-0.5)*4, vy: -Math.random()*4, life: 30, c: '#fff'});
+      score++;
+      beep(900,'triangle',0.04,0.04);
+    }
+
+    // missed
+    if(ball.y - ball.r > canvas.height){
+      // reset
+      ball.x = canvas.width/2; ball.y = 120; ball.vx = 3*(Math.random()<0.5?1:-1); ball.vy = 4; score = 0;
+      createScoreSplash('Missed', '#f87171');
+    }
+
+    // particles update
+    for(let i = particles.length - 1; i >= 0; i--){
+      let p = particles[i];
+      p.x += p.vx; p.y += p.vy; p.vy += 0.12; p.life--;
+      if(p.life <= 0) particles.splice(i,1);
+    }
+  }
+
+  function draw(){
+    // grass background
+    const g = ctx.createLinearGradient(0,0,0,canvas.height);
+    g.addColorStop(0,'#0b3b2f'); g.addColorStop(1,'#06392f');
+    ctx.fillStyle = g; ctx.fillRect(0,0,canvas.width,canvas.height);
+
+    // headline
+    ctx.fillStyle = '#e6fbff'; ctx.font='22px Arial'; ctx.textAlign='left';
+    ctx.fillText('Atrapa la pelota — Puntos: ' + score, 16, 36);
+
+    // ball (sphere shading)
+    ctx.beginPath(); ctx.fillStyle='#ffffff'; ctx.shadowBlur=16; ctx.shadowColor='rgba(0,0,0,0.5)'; ctx.arc(ball.x, ball.y, ball.r, 0, Math.PI*2); ctx.fill(); ctx.shadowBlur=0;
+    // panel effect (simple)
+    ctx.beginPath(); ctx.strokeStyle='rgba(0,0,0,0.06)'; ctx.lineWidth=1; ctx.arc(ball.x - 2, ball.y - 3, ball.r*0.85, 0, Math.PI*2); ctx.stroke();
+
+    // paddle with highlight
+    ctx.fillStyle = '#ffd54a'; ctx.beginPath(); roundRect(ctx, paddleX, canvas.height - 70, paddleW, paddleH, 8, true, false);
+    ctx.fillStyle='rgba(255,255,255,0.07)'; ctx.fillRect(paddleX, canvas.height - 70, paddleW, 6);
+
+    // net area (visual)
+    ctx.strokeStyle='rgba(255,255,255,0.03)'; for(let i=0;i<=canvas.width;i+=20){ctx.beginPath(); ctx.moveTo(i, canvas.height - 120); ctx.lineTo(i, canvas.height); ctx.stroke();}
+    for(let j=canvas.height-120;j<=canvas.height;j+=12){ ctx.beginPath(); ctx.moveTo(0,j); ctx.lineTo(canvas.width, j); ctx.stroke(); }
+
+    // particles
+    for(let p of particles){ ctx.globalAlpha = Math.max(0, p.life/30); ctx.fillStyle = p.c; ctx.beginPath(); ctx.arc(p.x,p.y,3,0,Math.PI*2); ctx.fill(); ctx.globalAlpha=1; }
+    // instructions
+    ctx.font='12px Arial'; ctx.fillStyle='rgba(255,255,255,0.6)'; ctx.textAlign='right';
+    ctx.fillText('← → o tocar para mover', canvas.width - 10, canvas.height - 10);
+  }
+
+  function loop(){ update(); draw(); raf = requestAnimationFrame(loop); }
+  function createScoreSplash(text, color){ /* small overlay */ 
+    const start = performance.now();
+    const d = 900;
+    (function anim(){
+      const now = performance.now(); const t = (now - start)/d;
+      if(t>=1) return;
+      ctx.save();
+      ctx.globalAlpha = 1 - t;
+      ctx.fillStyle = color; ctx.font = '48px Arial'; ctx.textAlign = 'center';
+      ctx.fillText(text, canvas.width/2, canvas.height/2 - t*60);
+      ctx.restore();
+      requestAnimationFrame(anim);
+    })();
+  }
+
+  loop();
+}
+
+/* ---------- FÚTBOL 2-JUGADORES Mejorado (arcos realistas) ---------- */
+function startFutbol2P(){
+  // field dims
+  const W = canvas.width, H = canvas.height;
+  const playerR = 20;
+  let blue = {x: 120, y: H/2, vx:0, vy:0, color:'#2b8cff'};
+  let red  = {x: W-120, y: H/2, vx:0, vy:0, color:'#ff6b6b'};
+  let ball = {x: W/2, y: H/2, r:12, vx: 0, vy:0};
+  let scoreB = 0, scoreR = 0;
+  const goalDepth = 40, goalSize = 150; // vertical span of goal
+
+  // kickoff
+  function kickoff(side){
+    ball.x = W/2; ball.y = H/2;
+    ball.vx = (side === 'blue') ? -4 : 4;
+    ball.vy = (Math.random()-0.5)*2.5;
+    blue.x = 120; blue.y = H/2;
+    red.x = W-120; red.y = H/2;
+  }
+  kickoff();
+
+  // controls
+  function handleControls(){
+    blue.vx = blue.vy = 0;
+    red.vx = red.vy = 0;
+    if(keys['w']||keys['W']) blue.y -= 4; if(keys['s']||keys['S']) blue.y += 4;
+    if(keys['a']||keys['A']) blue.x -= 4; if(keys['d']||keys['D']) blue.x += 4;
+    if(keys['ArrowUp']) red.y -= 4; if(keys['ArrowDown']) red.y += 4;
+    if(keys['ArrowLeft']) red.x -= 4; if(keys['ArrowRight']) red.x += 4;
+    // keep inside bounds
+    const pad = 12;
+    [blue, red].forEach(p => {
+      p.x = Math.max(pad + playerR, Math.min(W - pad - playerR, p.x));
+      p.y = Math.max(pad + playerR, Math.min(H - pad - playerR, p.y));
+    });
+    // reset
+    if(keys['r']||keys['R']){ scoreB=0; scoreR=0; kickoff('blue'); keys['r']=false; keys['R']=false; }
+  }
+
+  function updateBall(){
+    // ball physics
+    ball.x += ball.vx; ball.y += ball.vy;
+    // friction
+    ball.vx *= 0.995; ball.vy *= 0.995;
+    // walls top-bottom
+    if(ball.y - ball.r <= 6 || ball.y + ball.r >= H - 6) { ball.vy *= -1; beep(700,'sine',0.03,0.02); }
+
+    // collision with players (circle-circle)
+    function collidePlayer(p, name){
+      const dx = ball.x - p.x, dy = ball.y - p.y;
+      const dist = Math.sqrt(dx*dx + dy*dy);
+      if(dist < pRsum) {
+        // push ball away and add player's movement influence
+        const nx = dx/dist, ny = dy/dist;
+        ball.vx = nx * (4 + Math.abs(ball.vx))*1.1 + (Math.random()-0.5)*0.6;
+        ball.vy = ny * (4 + Math.abs(ball.vy))*1.1 + (Math.random()-0.5)*0.6;
+        // small cap
+        const max = 10;
+        ball.vx = Math.max(-max, Math.min(max, ball.vx));
+        ball.vy = Math.max(-max, Math.min(max, ball.vy));
+        createGoalDust(ball.x, ball.y, p.color);
+        beep(900,'sine',0.03,0.04); kickSound();
+      }
+    }
+    const pRsum = playerR + ball.r;
+
+    collidePlayer(blue, 'blue'); collidePlayer(red, 'red');
+
+    // goals: left and right inside goal depth and centered vertically
+    const goalTop = (H/2) - goalSize/2, goalBottom = (H/2) + goalSize/2;
+    // left goal (x <= goalDepth)
+    if(ball.x - ball.r <= goalDepth){
+      if(ball.y > goalTop && ball.y < goalBottom){
+        // goal for red team
+        scoreR++; showBigText('GOOOOL!', '#ffd166'); kickoff('red'); playGoalSound(); return;
+      } else { ball.vx *= -1; ball.x = goalDepth + ball.r + 2; }
+    }
+    // right goal
+    if(ball.x + ball.r >= W - goalDepth){
+      if(ball.y > goalTop && ball.y < goalBottom){
+        scoreB++; showBigText('GOOOOL!', '#ffd166'); kickoff('blue'); playGoalSound(); return;
+      } else { ball.vx *= -1; ball.x = W - goalDepth - ball.r - 2; }
+    }
+
+    // keep ball inside horizontally if tiny drift
+    if(ball.x < -50 || ball.x > W + 50){ kickoff('blue'); }
+  }
+
+  // small dust particles for contact
+  let dust = [];
+  function createGoalDust(x,y,color){
+    for(let i=0;i<10;i++) dust.push({x,y,vx:(Math.random()-0.5)*3, vy:(Math.random()-0.8)*3, life:30, c:color});
+  }
+  function updateDust(){
+    for(let i=dust.length-1;i>=0;i--){
+      const p = dust[i]; p.x += p.vx; p.y += p.vy; p.vy += 0.08; p.life--; if(p.life<=0) dust.splice(i,1);
+    }
+  }
+
+  function drawField(){
+    // grass with stripes
+    const g = ctx.createLinearGradient(0,0,0,H);
+    g.addColorStop(0,'#1e6e2f'); g.addColorStop(1,'#14632b'); ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+
+    // alternating stripes
+    for(let i=0;i<10;i++){
+      ctx.fillStyle = (i%2==0)?'rgba(255,255,255,0.02)':'rgba(255,255,255,0.0)';
+      ctx.fillRect(0, (i*(H/10)), W, H/10);
+    }
+
+    // sidelines
+    ctx.strokeStyle = 'white'; ctx.lineWidth = 3;
+    ctx.strokeRect(8,8,W-16,H-16);
+
+    // center circle
+    ctx.beginPath(); ctx.arc(W/2, H/2, 80, 0, Math.PI*2); ctx.stroke();
+
+    // midline
+    ctx.beginPath(); ctx.moveTo(W/2, 8); ctx.lineTo(W/2, H-8); ctx.stroke();
+
+    // goals (left and right) with posts and nets (realistic)
+    drawGoalLeft(8, H/2 - goalSize/2, goalDepth, goalSize);
+    drawGoalRight(W - 8 - goalDepth, H/2 - goalSize/2, goalDepth, goalSize);
+    // scoreboard
+    ctx.fillStyle = '#ffffff'; ctx.font = '22px Arial'; ctx.textAlign = 'center';
+    ctx.fillText(`Azul ${scoreB} — ${scoreR} Rojo`, W/2, 36);
+  }
+
+  function drawGoalLeft(x,y,depth,height){
+    // posts
+    ctx.fillStyle='white'; ctx.fillRect(x, y, 6, height); ctx.fillRect(x + depth - 6, y, 6, height);
+    // crossbar
+    ctx.fillRect(x, y, depth, 6);
+    // net: draw grid inside goal lateral plane
+    ctx.strokeStyle='rgba(255,255,255,0.06)'; ctx.lineWidth = 1;
+    for(let ix=6; ix<depth-6; ix+=10){
+      ctx.beginPath(); ctx.moveTo(x + ix, y + 6); ctx.lineTo(x + ix, y + height); ctx.stroke();
+    }
+    for(let iy=6; iy<height; iy+=10){
+      ctx.beginPath(); ctx.moveTo(x + 6, y + iy); ctx.lineTo(x + depth - 6, y + iy); ctx.stroke();
+    }
+  }
+  function drawGoalRight(x,y,depth,height){
+    ctx.fillStyle='white'; ctx.fillRect(x + depth - 6, y, 6, height); ctx.fillRect(x, y, 6, height);
+    ctx.fillRect(x, y, depth, 6);
+    ctx.strokeStyle='rgba(255,255,255,0.06)'; ctx.lineWidth = 1;
+    for(let ix=6; ix<depth-6; ix+=10){
+      ctx.beginPath(); ctx.moveTo(x + ix, y + 6); ctx.lineTo(x + ix, y + height); ctx.stroke();
+    }
+    for(let iy=6; iy<height; iy+=10){
+      ctx.beginPath(); ctx.moveTo(x + 6, y + iy); ctx.lineTo(x + depth - 6, y + iy); ctx.stroke();
+    }
+  }
+
+  // ball draw with simple panel pattern for realism
+  function drawBall(x,y,r){
+    // main sphere
+    ctx.beginPath(); ctx.fillStyle='#fff'; ctx.shadowBlur=10; ctx.shadowColor='rgba(0,0,0,0.4)'; ctx.arc(x,y,r,0,Math.PI*2); ctx.fill(); ctx.shadowBlur=0;
+    // dark panels - simple cross shading
+    ctx.beginPath(); ctx.fillStyle='rgba(0,0,0,0.12)'; ctx.ellipse(x - r*0.15, y - r*0.12, r*0.55, r*0.35, 0.4, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.fillStyle='rgba(0,0,0,0.06)'; ctx.ellipse(x + r*0.25, y + r*0.18, r*0.4, r*0.26, -0.6, 0, Math.PI*2); ctx.fill();
+    // borders for 3D
+    ctx.beginPath(); ctx.strokeStyle='rgba(0,0,0,0.06)'; ctx.lineWidth=1; ctx.arc(x,y,r,0,Math.PI*2); ctx.stroke();
+  }
+
+  // big "GOOOL" overlay
+  function showBigText(text, color){
+    const start = performance.now(), dur = 900;
+    (function anim(){
+      const now = performance.now(), t = (now - start)/dur;
+      if(t>1) return;
+      ctx.save();
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.fillStyle = color;
+      ctx.globalAlpha = 1 - Math.min(0.9,t*1.6);
+      ctx.font = `${60 + Math.floor(20*(1 - t))}px Arial`;
+      ctx.textAlign = 'center';
+      ctx.fillText(text, W/2, H/2);
+      ctx.restore();
+      requestAnimationFrame(anim);
+    })();
+  }
+
+  function playGoalSound(){
+    beep(880,'sine',0.16,0.08); setTimeout(()=>beep(1320,'sine',0.08,0.06), 120);
+  }
+
+  function loop(){
+    handleControls();
+    updateBall(); updateDust(); // dust
+    // draw
+    ctx.clearRect(0,0,W,H);
+    drawField();
+    // draw players with shadow and number
+    drawPlayer(blue); drawPlayer(red);
+    // draw ball
+    drawBall(ball.x, ball.y, ball.r);
+    // dust
+    for(let p of dust){ ctx.globalAlpha = Math.max(0, p.life/40); ctx.fillStyle = p.c; ctx.beginPath(); ctx.arc(p.x,p.y,3,0,Math.PI*2); ctx.fill(); ctx.globalAlpha=1; }
+    raf = requestAnimationFrame(loop);
+  }
+
+  function drawPlayer(p){
+    ctx.save(); ctx.shadowColor='rgba(0,0,0,0.45)'; ctx.shadowBlur=14;
+    ctx.beginPath(); ctx.fillStyle = p.color; ctx.arc(p.x, p.y, playerR, 0, Math.PI*2); ctx.fill();
+    ctx.restore();
+    ctx.fillStyle='rgba(255,255,255,0.9)'; ctx.font='14px Arial'; ctx.textAlign='center';
+    // small label
+    ctx.fillText(p === blue ? 'Azul' : 'Rojo', p.x, p.y + playerR + 14);
+  }
+
+  loop();
+}
+
+/* ---------- TETRIS Mejorado ---------- */
+function startTetris(){
+  // grid config
+  const COLS = 10, ROWS = 20;
+  const BLOCK = 36;
+  canvas.width = COLS * BLOCK; canvas.height = ROWS * BLOCK;
+  const colors = [null, '#06b6d4','#fb7185','#f59e0b','#34d399','#60a5fa','#a78bfa','#f97316'];
+  const SHAPES = {
+    I: [[1,1,1,1]],
+    O: [[1,1],[1,1]],
+    T: [[0,1,0],[1,1,1]],
+    L: [[1,0,0],[1,1,1]],
+    J: [[0,0,1],[1,1,1]],
+    S: [[0,1,1],[1,1,0]],
+    Z: [[1,1,0],[0,1,1]]
+  };
+  const keysMap = {'ArrowLeft': -1, 'ArrowRight': 1};
+  let board = Array.from({length:ROWS},()=>Array(COLS).fill(0));
+  let piece = spawn();
+  let score = 0; let dropSpeed = 600; let lastTime = 0;
+
+  function spawn(){
+    const keys = Object.keys(SHAPES);
+    const k = keys[Math.floor(Math.random()*keys.length)];
+    const m = SHAPES[k].map(r=>r.slice());
+    return {x: Math.floor((COLS - m[0].length)/2), y: 0, matrix: m, color: 1 + Math.floor(Math.random()*(colors.length-1))};
+  }
+
+  function rotate(m){
+    const N = m.length;
+    const res = Array.from({length:N},()=>Array(N).fill(0));
+    for(let r=0;r<N;r++) for(let c=0;c<N;c++) res[c][N-1-r]=m[r][c];
+    // trim zeros (not strictly necessary)
+    return res;
+  }
+
+  function collide(offsetX=0, offsetY=0){
+    const m = piece.matrix;
+    for(let r=0;r<m.length;r++){
+      for(let c=0;c<m[r].length;c++){
+        if(!m[r][c]) continue;
+        const x = piece.x + c + offsetX, y = piece.y + r + offsetY;
+        if(x < 0 || x >= COLS || y >= ROWS) return true;
+        if(y >=0 && board[y][x]) return true;
+      }
+    }
+    return false;
+  }
+
+  function lock(){
+    const m = piece.matrix;
+    for(let r=0;r<m.length;r++) for(let c=0;c<m[r].length;c++){
+      if(m[r][c] && piece.y + r >=0) board[piece.y + r][piece.x + c] = piece.color;
+    }
+    clearLines();
+    piece = spawn();
+    if(collide(0,0)){ // game over -> reset
+      board = Array.from({length:ROWS},()=>Array(COLS).fill(0));
+      score = 0; dropSpeed = 600;
+      piece = spawn();
+    }
+  }
+
+  function clearLines(){
+    let lines = 0;
+    for(let r = ROWS -1; r>=0; r--){
+      if(board[r].every(x => x !== 0)){
+        board.splice(r,1); board.unshift(Array(COLS).fill(0)); lines++; r++;
+      }
+    }
+    if(lines){ score += lines * 100; dropSpeed = Math.max(80, dropSpeed - lines*12); beep(800,'sine',0.06,0.04); }
+  }
+
+  window.onkeydown = e => {
+    if(e.key === 'ArrowLeft'){ if(!collide(-1,0)) piece.x -=1; }
+    if(e.key === 'ArrowRight'){ if(!collide(1,0)) piece.x +=1; }
+    if(e.key === 'ArrowDown'){ if(!collide(0,1)) piece.y +=1; }
+    if(e.key === 'ArrowUp'){ // rotate with simple kick
+      const rotated = rotate(piece.matrix);
+      const old = piece.matrix; piece.matrix = rotated;
+      if(collide()) piece.matrix = old;
+    }
+    if(e.key === ' '){ // hard drop
+      while(!collide(0,1)) piece.y++;
+      lock();
+    }
+  };
+
+  function update(time=0){
+    if(!lastTime) lastTime = time;
+    if(time - lastTime > dropSpeed){
+      if(!collide(0,1)) piece.y++;
+      else lock();
+      lastTime = time;
+    }
+  }
+
+  function draw(){
+    // background
+    ctx.fillStyle = '#041828'; ctx.fillRect(0,0,canvas.width,canvas.height);
+    // grid and board
+    for(let r=0;r<ROWS;r++){
+      for(let c=0;c<COLS;c++){
+        if(board[r][c]){
+          drawBlock(c, r, colors[board[r][c]]);
+        } else {
+          ctx.strokeStyle = 'rgba(255,255,255,0.03)'; ctx.strokeRect(c*BLOCK, r*BLOCK, BLOCK, BLOCK);
+        }
+      }
+    }
+    // current piece with shading
+    const m = piece.matrix;
+    for(let r=0;r<m.length;r++) for(let c=0;c<m[r].length;c++){
+      if(m[r][c]) drawBlock(piece.x + c, piece.y + r, colors[piece.color]);
+    }
+    // HUD
+    ctx.fillStyle = '#dff6ff'; ctx.font = '18px Arial'; ctx.textAlign = 'left';
+    ctx.fillText('Score: ' + score, 8, 22);
+    ctx.fillStyle = 'rgba(255,255,255,0.6)'; ctx.font='12px Arial';
+    ctx.fillText('Controls: ← → ↓ ↑ rotar  Espacio soltar', 8, canvas.height - 8);
+  }
+
+  function drawBlock(cx, cy, color){
+    const x = cx * BLOCK, y = cy * BLOCK;
+    // block base
+    ctx.fillStyle = color; ctx.fillRect(x + 2, y + 2, BLOCK - 4, BLOCK - 4);
+    // top highlight
+    ctx.fillStyle = 'rgba(255,255,255,0.14)'; ctx.fillRect(x + 4, y + 4, BLOCK - 8, 8);
+    // inner border
+    ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = 2; ctx.strokeRect(x + 2, y + 2, BLOCK - 4, BLOCK - 4);
+  }
+
+  function loop(time){
+    update(time); draw();
+    raf = requestAnimationFrame(loop);
+  }
+  loop();
+}
+
+/* ---------- Helpers ---------- */
+function roundRect(ctx,x,y,w,h,r,fill,stroke){
+  if(typeof r === 'undefined') r = 5;
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+  if(fill) ctx.fill(); if(stroke) ctx.stroke();
+}
+
+/* small global particle container (used by some games) */
+let globalParticles = [];
+
+/* start default */
+select('pong');
+
+</script>
+</body>
+</html>
